@@ -29,10 +29,12 @@ TRPG_NGROK_URL_FILE = Path(
 # ── 釣り機能 ──────────────────────────────────────────────────────────────
 
 def build_fishing_intent_prompt(text: str) -> list:
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
     return [
         {
             "role": "system",
             "content": (
+                f"今日の日付は {today}（JST）です。\n"
                 "あなたは釣りに関する質問を判定するAIです。\n"
                 "ユーザーが以下のいずれかを求めている場合は fishing: true にしてください:\n"
                 "- 潮汐（大潮・中潮・小潮・干潮・満潮・潮の種類）の質問\n"
@@ -40,32 +42,35 @@ def build_fishing_intent_prompt(text: str) -> list:
                 "- 釣りに行けるか・釣れるか・釣り条件の質問\n"
                 "- 国府津・東扇島西公園・本牧海づり施設・大黒海づり施設への言及\n\n"
                 "対象釣り場が特定できれば location に入れてください（上記4箇所のいずれか）。\n"
-                "日付が特定できれば date に YYYY-MM-DD 形式で入れてください。\n"
+                "日付が特定できれば dates に YYYY-MM-DD 形式のリストで入れてください。\n"
+                "「今週土日」「来週末」など複数日の場合は複数要素のリストにしてください。\n"
                 "JSONのみ返してください:\n"
-                "{\"fishing\": true|false, \"location\": \"釣り場名またはnull\", \"date\": \"日付またはnull\"}"
+                "{\"fishing\": true|false, \"location\": \"釣り場名またはnull\", \"dates\": [\"YYYY-MM-DD\", ...]}"
             ),
         },
         {"role": "user", "content": text},
     ]
 
 
-def is_fishing_question(text: str) -> tuple[bool, str, str]:
-    """釣り質問かどうかを判定し (is_fishing, location, date) を返す"""
+def is_fishing_question(text: str) -> tuple[bool, str, list[str]]:
+    """釣り質問かどうかを判定し (is_fishing, location, dates) を返す"""
     try:
         response = client.chat.completions.create(
             model="gpt-5.4-nano",
             messages=build_fishing_intent_prompt(text),
-            max_completion_tokens=80,
+            max_completion_tokens=120,
             temperature=0,
         )
         parsed = json.loads(response.choices[0].message.content.strip())
         is_fishing = bool(parsed.get("fishing"))
         location = parsed.get("location") or ""
-        target_date = parsed.get("date") or ""
-        return is_fishing, location, target_date
+        dates = parsed.get("dates") or []
+        if isinstance(dates, str):
+            dates = [dates] if dates else []
+        return is_fishing, location, dates
     except Exception as e:
         print(f"[fishing intent parse error] {e}")
-        return False, "", ""
+        return False, "", []
 
 
 async def get_fishing_via_mcp(location: str, target_date: str = "") -> str:
@@ -411,9 +416,17 @@ async def on_message(message: discord.Message):
         return
 
     # 釣り質問の処理
-    fishing, fishing_location, fishing_date = is_fishing_question(question)
+    fishing, fishing_location, fishing_dates = is_fishing_question(question)
     if fishing:
-        fishing_info = await get_fishing_via_mcp(fishing_location, fishing_date)
+        if fishing_dates:
+            snippets = []
+            for d in fishing_dates:
+                s = await get_fishing_via_mcp(fishing_location, d)
+                if s:
+                    snippets.append(s)
+            fishing_info = "\n\n".join(snippets)
+        else:
+            fishing_info = await get_fishing_via_mcp(fishing_location)
         if fishing_info:
             answer_prompt = build_answer_prompt_full(question, [], [fishing_info], honesty_level)
             answer_response = client.chat.completions.create(
