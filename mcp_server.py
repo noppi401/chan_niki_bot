@@ -14,6 +14,7 @@ from fishing_mcp.lunar import lunar_age, tide_type, tide_type_rating, moon_phase
 from fishing_mcp.tide import fetch_tide_info
 from fishing_mcp.temperature import fetch_sea_temperature
 from fishing_mcp.weather import fetch_weather
+from fishing_mcp.jma_areas import resolve_area, all_supported_names
 from slowapi.util import get_remote_address
 
 load_dotenv()
@@ -93,6 +94,62 @@ async def search(request: Request, q: str = Query(...)):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ── 天気エンドポイント ────────────────────────────────────────────────────
+
+@app.get("/weather")
+async def weather_endpoint(
+    location: str = Query(..., description="地名（関東1都6県の市区町村名・都道府県名）"),
+    target_date: str = Query("", description="YYYY-MM-DD形式。省略時は今日"),
+):
+    """関東1都6県の任意地点の天気情報を返す"""
+    area = resolve_area(location)
+    if area is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": f"'{location}' は対応エリア外です",
+                "hint": "関東1都6県の市区町村名または都道府県名を入力してください",
+            },
+        )
+    forecast_code, area_code, temp_code, display_name = area
+
+    d: date
+    if target_date:
+        try:
+            d = date.fromisoformat(target_date)
+        except ValueError:
+            d = date.today()
+    else:
+        d = date.today()
+
+    weather = await fetch_weather(area_code, temp_code, d, forecast_code=forecast_code)
+    if not weather:
+        return JSONResponse(status_code=503, content={"error": "天気データを取得できませんでした"})
+
+    lines = [f"【{display_name}】天気予報 {d.strftime('%Y/%m/%d')}"]
+    if weather.get("weather"):
+        lines.append(f"天気: {weather['weather']}")
+    if weather.get("wind"):
+        lines.append(f"風: {weather['wind']}")
+    if weather.get("waves"):
+        lines.append(f"波: {weather['waves']}")
+    if weather.get("pops"):
+        lines.append(f"降水確率: {' / '.join(weather['pops'])}%")
+    if weather.get("temp_min") and weather.get("temp_max"):
+        lines.append(f"気温: 最低{weather['temp_min']}℃ / 最高{weather['temp_max']}℃")
+    elif weather.get("temp_max"):
+        lines.append(f"気温: 最高{weather['temp_max']}℃")
+    if weather.get("fishing_weather_comment"):
+        lines.append(f"コメント: {weather['fishing_weather_comment']}")
+
+    return {
+        "location": display_name,
+        "date": d.isoformat(),
+        "summary": "\n".join(lines),
+        "raw": weather,
+    }
+
+
 # ── 釣り情報エンドポイント ──────────────────────────────────────────────
 
 @app.get("/fishing/spots")
@@ -167,6 +224,7 @@ async def fishing_conditions(
             loc.get("jma_area_code", "140010"),
             loc.get("jma_temp_code", "46106"),
             d,
+            forecast_code=loc.get("jma_forecast_code", "140000"),
         )
         if weather:
             lines.append("─")
