@@ -13,6 +13,7 @@ from fishing_mcp.locations import get_location, all_location_names, LOCATIONS
 from fishing_mcp.lunar import lunar_age, tide_type, tide_type_rating, moon_phase_name
 from fishing_mcp.tide import fetch_tide_info
 from fishing_mcp.temperature import fetch_sea_temperature
+from fishing_mcp.weather import fetch_weather
 from slowapi.util import get_remote_address
 
 load_dotenv()
@@ -160,6 +161,31 @@ async def fishing_conditions(
             lines.append(f"海水温: {temp['temperature_c']:.1f}°C（{temp['source']}）")
     except Exception:
         pass
+
+    try:
+        weather = await fetch_weather(
+            loc.get("jma_area_code", "140010"),
+            loc.get("jma_temp_code", "46106"),
+            d,
+        )
+        if weather:
+            lines.append("─")
+            if weather.get("weather"):
+                lines.append(f"天気: {weather['weather']}")
+            if weather.get("wind"):
+                lines.append(f"風: {weather['wind']}")
+            if weather.get("waves"):
+                lines.append(f"波: {weather['waves']}")
+            if weather.get("pops"):
+                lines.append(f"降水確率: {' / '.join(weather['pops'])}%")
+            if weather.get("temp_min") and weather.get("temp_max"):
+                lines.append(f"気温: 最低{weather['temp_min']}℃ / 最高{weather['temp_max']}℃")
+            elif weather.get("temp_max"):
+                lines.append(f"気温: 最高{weather['temp_max']}℃")
+            if weather.get("fishing_weather_comment"):
+                lines.append(f"釣り影響: {weather['fishing_weather_comment']}")
+    except Exception as e:
+        lines.append(f"※天気取得エラー: {e}")
 
     lines.append(f"狙える魚: {' / '.join(loc['target_fish'])}")
     lines.append(f"釣り方: {' / '.join(loc['fishing_style'])}")
