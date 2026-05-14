@@ -1,13 +1,17 @@
+import asyncio
 import os
 import base64
+import contextlib
 import discord
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import json
 import httpx
+import ngrok
 import re
 from pathlib import Path
+from typing import Any
 
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -25,6 +29,76 @@ TRPG_NGROK_URL_FILE = Path(
     or os.getenv("NGROK_URL_FILE")
     or r"C:\Users\noppi\Documents\Products\trpg_terminal\ngrok-url.txt"
 )
+AIVENV_API_URL = os.getenv("AIVENV_API_URL", "http://127.0.0.1:8080")
+TRPG_PORT = int(os.getenv("TRPG_PORT", "3001"))
+AIVENV_LOG_PORT = int(os.getenv("AIVENV_LOG_PORT", "8081"))
+NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN", "")
+NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")
+
+
+# ── Tunnel Manager ────────────────────────────────────────────────────────────
+
+class TunnelManager:
+    """ニキ主導でngrokトンネルを切り替える。ポートを変えるたびに既存セッションを閉じて新規接続する。"""
+
+    def __init__(self, auth_token: str, domain: str = "") -> None:
+        self._auth_token = auth_token
+        self._domain = domain
+        self._session: Any = None
+        self._listener: Any = None
+        self._public_url: str | None = None
+        self._current_port: int | None = None
+
+    async def switch_to(self, port: int) -> str | None:
+        """既存トンネルを閉じて指定ポートへの新規トンネルを開き、公開URLを返す。"""
+        await self._close()
+        try:
+            builder = ngrok.SessionBuilder()
+            if self._auth_token:
+                builder = builder.authtoken(self._auth_token)
+            else:
+                builder = builder.authtoken_from_env()
+            session = builder.connect()
+            if hasattr(session, "__await__"):
+                session = await session
+            self._session = session
+            ep = session.http_endpoint()
+            if self._domain:
+                ep = ep.domain(self._domain)
+            listener = ep.listen_and_forward(f"http://127.0.0.1:{port}")
+            if hasattr(listener, "__await__"):
+                listener = await listener
+            self._listener = listener
+            self._current_port = port
+            self._public_url = listener.url()
+            return self._public_url
+        except Exception as exc:
+            print(f"[tunnel switch error] {exc}")
+            await self._close()
+            return None
+
+    async def _close(self) -> None:
+        for obj in (self._listener, self._session):
+            if obj is None:
+                continue
+            with contextlib.suppress(Exception):
+                close_fn = getattr(obj, "close", None)
+                if close_fn is not None:
+                    result = close_fn()
+                    if hasattr(result, "__await__"):
+                        await result
+        self._listener = None
+        self._session = None
+        self._public_url = None
+        self._current_port = None
+
+    @property
+    def current_url(self) -> str | None:
+        return self._public_url
+
+
+tunnel_manager = TunnelManager(auth_token=NGROK_AUTHTOKEN, domain=NGROK_DOMAIN)
+
 
 # ── 釣り機能 ──────────────────────────────────────────────────────────────
 
@@ -92,7 +166,7 @@ async def get_fishing_via_mcp(location: str, target_date: str = "") -> str:
         return ""
 
 
-# ── TRPG URL ──────────────────────────────────────────────────────────────
+# ── TRPG / aivenv URL ─────────────────────────────────────────────────────────
 
 def build_ngrok_url_intent_prompt(text: str) -> list:
     return [
@@ -126,20 +200,148 @@ def is_terminal_url_request(text: str) -> bool:
         return False
 
 
-def read_ngrok_url() -> str | None:
-    try:
-        url = TRPG_NGROK_URL_FILE.read_text(encoding="ascii").strip()
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        print(f"[ngrok url read error] {e}")
-        return None
+def build_aivenv_url_intent_prompt(text: str) -> list:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "あなたはDiscordメッセージの意図判定器です。"
+                "ユーザーがAI実行環境（aivenv、VM、コード実行、AI実行ログ、実行結果、実行中の画面）のURLやリンクを求めている場合だけtrueにしてください。"
+                "TRPG Terminal・卓・セッション画面のURLはfalseです。"
+                "例: 『AIの実行ログURL教えて』『VM実行のリンク』『コード動かしてる画面どこ？』はtrue。"
+                "例: 『ターミナルのURL』『TRPGのリンク』はfalse。"
+                "JSONのみで返してください: {\"aivenv_url_request\": true|false}"
+            ),
+        },
+        {"role": "user", "content": text},
+    ]
 
-    if re.match(r"^https://[A-Za-z0-9.-]+\.ngrok(?:-free)?\.(?:app|dev)(?:/.*)?$", url):
-        return url
-    if re.match(r"^https://[A-Za-z0-9.-]+\.ngrok\.io(?:/.*)?$", url):
-        return url
-    return None
+
+def is_aivenv_url_request(text: str) -> bool:
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-nano",
+            messages=build_aivenv_url_intent_prompt(text),
+            max_completion_tokens=80,
+            temperature=0,
+        )
+        parsed = json.loads(response.choices[0].message.content.strip())
+        return bool(parsed.get("aivenv_url_request"))
+    except Exception as e:
+        print(f"[aivenv url intent parse error] {e}")
+        return False
+
+
+async def get_aivenv_current() -> dict:
+    """aivenvの現在の実行状態を取得する。"""
+    try:
+        async with httpx.AsyncClient() as client_http:
+            resp = await client_http.get(f"{AIVENV_API_URL}/current", timeout=5)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        print(f"[aivenv current error] {e}")
+        return {"active": False}
+
+
+def build_aivenv_run_intent_prompt(text: str) -> list:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "あなたはDiscordメッセージの意図判定器です。"
+                "ユーザーがAIにコードの実行・作成・タスク処理を依頼している場合だけtrueにしてください。"
+                "例: 『ハローワールドを出力するコード書いて』『Pythonでファイル読んで』『このスクリプト実行して』はtrue。"
+                "URLを聞いているだけ・ログを見たいだけ・会話・質問のみはfalse。"
+                "JSONのみで返してください: {\"aivenv_run_request\": true|false}"
+            ),
+        },
+        {"role": "user", "content": text},
+    ]
+
+
+def is_aivenv_run_request(text: str) -> bool:
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-nano",
+            messages=build_aivenv_run_intent_prompt(text),
+            max_completion_tokens=60,
+            temperature=0,
+        )
+        parsed = json.loads(response.choices[0].message.content.strip())
+        return bool(parsed.get("aivenv_run_request"))
+    except Exception as e:
+        print(f"[aivenv run intent parse error] {e}")
+        return False
+
+
+async def run_aivenv(instruction: str) -> dict:
+    """aivenvの /run エンドポイントにタスクを送信する。"""
+    try:
+        async with httpx.AsyncClient() as client_http:
+            resp = await client_http.post(
+                f"{AIVENV_API_URL}/run",
+                json={"instruction": instruction},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        print(f"[aivenv run error] {e}")
+        return {}
+
+
+async def get_aivenv_raw_log(execution_id: str) -> str:
+    """aivenvログサーバーから生ログを取得する。"""
+    try:
+        async with httpx.AsyncClient() as client_http:
+            resp = await client_http.get(
+                f"http://127.0.0.1:{AIVENV_LOG_PORT}/raw/{execution_id}", timeout=5
+            )
+            resp.raise_for_status()
+            return resp.text
+    except Exception as e:
+        print(f"[aivenv raw log error] {e}")
+        return ""
+
+
+def _infer_execution_success(log_text: str) -> bool | None:
+    """ログから成功/失敗を推定する。判定不能な場合はNone。"""
+    if not log_text:
+        return None
+    lower = log_text.lower()
+    error_patterns = ["traceback", "error:", "exception:", "exit code 1", "exit code 2", "syntaxerror", "systemerror"]
+    for pat in error_patterns:
+        if pat in lower:
+            return False
+    return True
+
+
+async def wait_for_aivenv_completion(
+    execution_id: str,
+    channel: discord.abc.Messageable,
+    log_url: str,
+    timeout_sec: int = 300,
+    poll_interval: int = 5,
+) -> None:
+    """aivenvの実行完了をポーリングし、成否をDiscordに送信する。"""
+    elapsed = 0
+    while elapsed < timeout_sec:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            info = await get_aivenv_current()
+            if not info.get("active") and elapsed > poll_interval:
+                log_text = await get_aivenv_raw_log(execution_id)
+                success = _infer_execution_success(log_text)
+                if success is False:
+                    await channel.send(f"実行完了（エラーあり） ログ: {log_url}")
+                else:
+                    await channel.send(f"実行完了（成功） ログ: {log_url}")
+                return
+        except Exception as e:
+            print(f"[wait_for_aivenv_completion poll error] {e}")
+    await channel.send(f"タイムアウト（{timeout_sec}秒）したよ。ログ確認してみて: {log_url}")
 
 
 # ── プロンプト ────────────────────────────────────────────────────────────
@@ -408,11 +610,44 @@ async def on_message(message: discord.Message):
     question = re.sub(r"<@!?[0-9]+>", "", message.content).strip()
 
     if is_terminal_url_request(question):
-        ngrok_url = read_ngrok_url()
-        if ngrok_url:
-            await message.channel.send(f"TRPG Terminal: {ngrok_url}")
+        async with message.channel.typing():
+            url = await tunnel_manager.switch_to(TRPG_PORT)
+        if url:
+            TRPG_NGROK_URL_FILE.write_text(url, encoding="ascii")
+            await message.channel.send(f"TRPG Terminal: {url}")
         else:
-            await message.channel.send("TRPG Terminalのngrok URLはまだ見つからないよ。start-dev.ps1で起動してからもう一度聞いてね。")
+            await message.channel.send("トンネルの切り替えに失敗したよ。ngrokの設定を確認して。")
+        return
+
+    if is_aivenv_url_request(question):
+        info = await get_aivenv_current()
+        if not info.get("active"):
+            await message.channel.send("現在実行中のAIタスクはないよ。aivenv start して /run を叩いてみて。")
+            return
+        eid = info.get("execution_id", "")
+        async with message.channel.typing():
+            url = await tunnel_manager.switch_to(AIVENV_LOG_PORT)
+        if url:
+            result_url = f"{url.rstrip('/')}/?id={eid}"
+            await message.channel.send(f"AI実行ログ: {result_url}")
+        else:
+            await message.channel.send("トンネルの切り替えに失敗したよ。")
+        return
+
+    if is_aivenv_run_request(question):
+        await message.channel.send("了解、実行するよ")
+        run_result = await run_aivenv(question)
+        if not run_result:
+            await message.channel.send("aivenvへの接続に失敗したよ。`aivenv start` してるか確認して。")
+            return
+        eid = run_result.get("execution_id", "")
+        async with message.channel.typing():
+            tunnel_url = await tunnel_manager.switch_to(AIVENV_LOG_PORT)
+        if tunnel_url:
+            log_url = f"{tunnel_url.rstrip('/')}/?id={eid}" if eid else tunnel_url
+            asyncio.create_task(wait_for_aivenv_completion(eid, message.channel, log_url))
+        else:
+            await message.channel.send("実行開始したけど、トンネルの切り替えに失敗したよ。")
         return
 
     # 釣り質問の処理
