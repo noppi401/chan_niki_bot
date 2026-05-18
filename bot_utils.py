@@ -3,6 +3,8 @@ import os
 import base64
 import contextlib
 import discord
+import subprocess
+import sys
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -34,6 +36,41 @@ TRPG_PORT = int(os.getenv("TRPG_PORT", "3001"))
 AIVENV_LOG_PORT = int(os.getenv("AIVENV_LOG_PORT", "8081"))
 NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN", "")
 NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")
+AIVENV_DIR = os.getenv("AIVENV_DIR", r"C:\Users\noppi\Documents\Products\vm-play-server")
+
+_aivenv_proc: subprocess.Popen | None = None
+
+
+def is_aivenv_server_running() -> bool:
+    return _aivenv_proc is not None and _aivenv_proc.poll() is None
+
+
+def start_aivenv_server() -> bool:
+    global _aivenv_proc
+    if is_aivenv_server_running():
+        return False
+    try:
+        _aivenv_proc = subprocess.Popen(
+            [sys.executable, "-m", "aivenv.cli", "start"],
+            cwd=AIVENV_DIR,
+        )
+        return True
+    except Exception as e:
+        print(f"[aivenv start error] {e}")
+        return False
+
+
+def stop_aivenv_server() -> bool:
+    global _aivenv_proc
+    if not is_aivenv_server_running():
+        return False
+    try:
+        _aivenv_proc.terminate()
+        _aivenv_proc = None
+        return True
+    except Exception as e:
+        print(f"[aivenv stop error] {e}")
+        return False
 
 
 # ── Tunnel Manager ────────────────────────────────────────────────────────────
@@ -244,6 +281,38 @@ async def get_aivenv_current() -> dict:
         return {"active": False}
 
 
+def build_aivenv_start_intent_prompt(text: str) -> list:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "あなたはDiscordメッセージの意図判定器です。"
+                "ユーザーがVM・AI実行環境・aivenvのサーバーそのものを『起動』『立ち上げ』することだけを求めている場合にtrueにしてください。"
+                "コードの実行・作成・タスク処理の依頼はfalseです（それは別の判定で扱います）。"
+                "例: 『VM環境起動して』『aivenv起動して』『AI実行環境立ち上げて』はtrue。"
+                "例: 『コード書いて』『スクリプト実行して』『URLは？』はfalse。"
+                "JSONのみで返してください: {\"aivenv_start_request\": true|false}"
+            ),
+        },
+        {"role": "user", "content": text},
+    ]
+
+
+def is_aivenv_start_request(text: str) -> bool:
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-nano",
+            messages=build_aivenv_start_intent_prompt(text),
+            max_completion_tokens=60,
+            temperature=0,
+        )
+        parsed = json.loads(response.choices[0].message.content.strip())
+        return bool(parsed.get("aivenv_start_request"))
+    except Exception as e:
+        print(f"[aivenv start intent parse error] {e}")
+        return False
+
+
 def build_aivenv_run_intent_prompt(text: str) -> list:
     return [
         {
@@ -273,6 +342,22 @@ def is_aivenv_run_request(text: str) -> bool:
     except Exception as e:
         print(f"[aivenv run intent parse error] {e}")
         return False
+
+
+async def wait_for_aivenv_ready(timeout_sec: int = 20) -> bool:
+    """aivenv API が応答するまで最大 timeout_sec 秒ポーリングする。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while loop.time() < deadline:
+        try:
+            async with httpx.AsyncClient() as c:
+                resp = await c.get(f"{AIVENV_API_URL}/current", timeout=2)
+                if resp.status_code < 500:
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    return False
 
 
 async def run_aivenv(instruction: str) -> dict:
@@ -590,6 +675,31 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
+    # !aivenv コマンド（メンション不要）
+    aivenv_match = re.match(r"^!aivenv(?:\s+(\w+))?", message.content.strip())
+    if aivenv_match:
+        subcmd = (aivenv_match.group(1) or "status").lower()
+        if subcmd == "start":
+            if is_aivenv_server_running():
+                await message.channel.send("aivenv はもう起動してるよ")
+            elif start_aivenv_server():
+                await message.channel.send("aivenv を起動したよ。準備できるまで少し待ってね。")
+            else:
+                await message.channel.send("aivenv の起動に失敗したよ。")
+        elif subcmd == "stop":
+            if stop_aivenv_server():
+                await message.channel.send("aivenv を停止したよ。")
+            else:
+                await message.channel.send("aivenv は起動していないよ。")
+        elif subcmd == "status":
+            if is_aivenv_server_running():
+                await message.channel.send("aivenv: 起動中")
+            else:
+                await message.channel.send("aivenv: 停止中")
+        else:
+            await message.channel.send("使い方: `!aivenv start` / `!aivenv stop` / `!aivenv status`")
+        return
+
     # !honesty コマンド（メンション不要）
     honesty_match = re.match(r"^!honesty(?:\s+(\d+))?", message.content.strip())
     if honesty_match:
@@ -622,7 +732,7 @@ async def on_message(message: discord.Message):
     if is_aivenv_url_request(question):
         info = await get_aivenv_current()
         if not info.get("active"):
-            await message.channel.send("現在実行中のAIタスクはないよ。aivenv start して /run を叩いてみて。")
+            await message.channel.send("現在実行中のAIタスクはないよ。")
             return
         eid = info.get("execution_id", "")
         async with message.channel.typing():
@@ -634,17 +744,33 @@ async def on_message(message: discord.Message):
             await message.channel.send("トンネルの切り替えに失敗したよ。")
         return
 
+    if is_aivenv_start_request(question):
+        if is_aivenv_server_running():
+            await message.channel.send("aivenv はもう起動してるよ。")
+        elif start_aivenv_server():
+            await message.channel.send("aivenv を起動したよ。準備できるまで少し待ってね。")
+        else:
+            await message.channel.send("aivenv の起動に失敗したよ。")
+        return
+
     if is_aivenv_run_request(question):
         await message.channel.send("了解、実行するよ")
+        if not is_aivenv_server_running():
+            await message.channel.send("aivenv が停止中だから先に起動するね...")
+            start_aivenv_server()
+            if not await wait_for_aivenv_ready():
+                await message.channel.send("aivenv の起動がタイムアウトしたよ。手動で確認してみて。")
+                return
         run_result = await run_aivenv(question)
         if not run_result:
-            await message.channel.send("aivenvへの接続に失敗したよ。`aivenv start` してるか確認して。")
+            await message.channel.send("aivenv への接続に失敗したよ。")
             return
         eid = run_result.get("execution_id", "")
         async with message.channel.typing():
             tunnel_url = await tunnel_manager.switch_to(AIVENV_LOG_PORT)
         if tunnel_url:
             log_url = f"{tunnel_url.rstrip('/')}/?id={eid}" if eid else tunnel_url
+            await message.channel.send(f"実行開始: {log_url}")
             asyncio.create_task(wait_for_aivenv_completion(eid, message.channel, log_url))
         else:
             await message.channel.send("実行開始したけど、トンネルの切り替えに失敗したよ。")
