@@ -7,6 +7,8 @@ import subprocess
 import sys
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 from dotenv import load_dotenv
 import json
 import httpx
@@ -15,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env", override=True)
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 client = OpenAI(api_key=OPENAI_KEY)
