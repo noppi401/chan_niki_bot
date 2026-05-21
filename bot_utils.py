@@ -361,8 +361,18 @@ async def wait_for_aivenv_ready(timeout_sec: int = 20) -> bool:
     return False
 
 
+async def stop_aivenv_if_running() -> None:
+    """実行中のセッションがあれば停止する（409対策）。"""
+    try:
+        async with httpx.AsyncClient() as c:
+            await c.post(f"{AIVENV_API_URL}/stop", json={}, timeout=10)
+    except Exception:
+        pass
+
+
 async def run_aivenv(instruction: str) -> dict:
     """aivenvの /run エンドポイントにタスクを送信する。"""
+    await stop_aivenv_if_running()
     try:
         async with httpx.AsyncClient() as client_http:
             resp = await client_http.post(
