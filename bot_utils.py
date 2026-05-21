@@ -768,12 +768,6 @@ async def on_message(message: discord.Message):
 
     if is_aivenv_run_request(question):
         await message.channel.send("了解、実行するよ")
-        if not is_aivenv_server_running() and not await wait_for_aivenv_ready(timeout_sec=2):
-            await message.channel.send("aivenv が停止中だから先に起動するね...")
-            start_aivenv_server()
-            if not await wait_for_aivenv_ready():
-                await message.channel.send("aivenv の起動がタイムアウトしたよ。手動で確認してみて。")
-                return
         run_result = await run_aivenv(question)
         if not run_result:
             await message.channel.send("aivenv への接続に失敗したよ。")
