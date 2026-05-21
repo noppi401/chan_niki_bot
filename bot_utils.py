@@ -49,9 +49,10 @@ def start_aivenv_server() -> bool:
     global _aivenv_proc
     if is_aivenv_server_running():
         return False
+    aivenv_exe = os.path.join(AIVENV_DIR, ".venv", "Scripts", "aivenv.exe")
     try:
         _aivenv_proc = subprocess.Popen(
-            [sys.executable, "-m", "aivenv.cli", "start"],
+            [aivenv_exe, "start"],
             cwd=AIVENV_DIR,
         )
         return True
@@ -367,7 +368,7 @@ async def run_aivenv(instruction: str) -> dict:
             resp = await client_http.post(
                 f"{AIVENV_API_URL}/run",
                 json={"instruction": instruction},
-                timeout=10,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()
@@ -755,7 +756,7 @@ async def on_message(message: discord.Message):
 
     if is_aivenv_run_request(question):
         await message.channel.send("了解、実行するよ")
-        if not is_aivenv_server_running():
+        if not is_aivenv_server_running() and not await wait_for_aivenv_ready(timeout_sec=2):
             await message.channel.send("aivenv が停止中だから先に起動するね...")
             start_aivenv_server()
             if not await wait_for_aivenv_ready():
