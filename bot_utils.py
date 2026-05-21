@@ -782,7 +782,7 @@ async def on_message(message: discord.Message):
         if tunnel_url:
             log_url = f"{tunnel_url.rstrip('/')}/?id={eid}" if eid else tunnel_url
             await message.channel.send(f"実行開始: {log_url}")
-            else:
+        else:
             await message.channel.send("実行開始したけど、トンネルの切り替えに失敗したよ。")
         return
 
