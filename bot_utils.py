@@ -681,7 +681,7 @@ async def on_message(message: discord.Message):
     if aivenv_match:
         subcmd = (aivenv_match.group(1) or "status").lower()
         if subcmd == "start":
-            if is_aivenv_server_running():
+            if is_aivenv_server_running() or await wait_for_aivenv_ready(timeout_sec=2):
                 await message.channel.send("aivenv はもう起動してるよ")
             elif start_aivenv_server():
                 await message.channel.send("aivenv を起動したよ。準備できるまで少し待ってね。")
@@ -746,7 +746,7 @@ async def on_message(message: discord.Message):
         return
 
     if is_aivenv_start_request(question):
-        if is_aivenv_server_running():
+        if is_aivenv_server_running() or await wait_for_aivenv_ready(timeout_sec=2):
             await message.channel.send("aivenv はもう起動してるよ。")
         elif start_aivenv_server():
             await message.channel.send("aivenv を起動したよ。準備できるまで少し待ってね。")
@@ -772,8 +772,7 @@ async def on_message(message: discord.Message):
         if tunnel_url:
             log_url = f"{tunnel_url.rstrip('/')}/?id={eid}" if eid else tunnel_url
             await message.channel.send(f"実行開始: {log_url}")
-            asyncio.create_task(wait_for_aivenv_completion(eid, message.channel, log_url))
-        else:
+            else:
             await message.channel.send("実行開始したけど、トンネルの切り替えに失敗したよ。")
         return
 
