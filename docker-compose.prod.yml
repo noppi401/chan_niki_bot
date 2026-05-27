@@ -1,0 +1,89 @@
+# ニキ 本番スタック（Ubuntu）。trpg_terminal と同じく start-prod.sh で起動する。
+#   bash start-prod.sh --build
+#
+# 構成:
+#   niki      … Discord bot（bot_utils.py）。ngrok トンネルを 127.0.0.1 のローカル
+#                ポートへ転送し、mcp/ログサーバも localhost 前提で参照するため
+#                network_mode: host で動かす（bot 側のコード変更を避ける）。
+#   niki-mcp  … FastAPI(検索/天気/釣り)。127.0.0.1:8000 に publish。
+#   aivenv    … vm-play-server。ホストの Docker daemon でサンドボックス実行する。
+#                docker.sock をマウントし、作業ディレクトリをホストと同一パスで共有する。
+#
+# 要件: Docker Compose v2.17+（additional_contexts / dockerfile_inline を使用）。
+#
+# .env は2つ必要:
+#   ./.env                     … ニキ/mcp 用（DISCORD/OPENAI/GOOGLE/NGROK …）
+#   ../vm-play-server/.env     … aivenv 用（OPENAI_API_KEY / NGROK_AUTHTOKEN …）
+
+# ディレクトリ名 ニキ(非ASCII)から自動導出できないためプロジェクト名を明示する。
+name: niki
+
+services:
+  niki-mcp:
+    image: niki-app:latest
+    container_name: niki-mcp
+    build:
+      context: .
+      additional_contexts:
+        fishing_mcp: ../fishing-mcp
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+        WORKDIR /app
+        COPY requirements.txt ./
+        RUN pip install --upgrade pip && pip install -r requirements.txt
+        COPY --from=fishing_mcp . /tmp/fishing-mcp
+        RUN pip install /tmp/fishing-mcp
+        COPY . /app
+    command: uvicorn mcp_server:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ./.env
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: always
+
+  aivenv:
+    container_name: aivenv
+    build:
+      context: ../vm-play-server
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+        WORKDIR /app
+        COPY . /app
+        RUN pip install --upgrade pip && pip install .
+        CMD ["aivenv", "start"]
+    env_file:
+      - ../vm-play-server/.env
+    environment:
+      # コンテナ内で 0.0.0.0 にバインドし、127.0.0.1 への publish を成立させる。
+      AIVENV_HOST: 0.0.0.0
+      AIVENV_LOG_HOST: 0.0.0.0
+      AIVENV_API_PORT: "8080"
+      AIVENV_LOG_PORT: "8081"
+      # スクリプト生成先をホストと同一パスにし、ホスト daemon の bind mount を成立させる。
+      TMPDIR: ${AIVENV_WORK_DIR:-/opt/aivenv/work}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AIVENV_WORK_DIR:-/opt/aivenv/work}:${AIVENV_WORK_DIR:-/opt/aivenv/work}
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    restart: always
+
+  niki:
+    image: niki-app:latest
+    container_name: niki
+    depends_on:
+      - niki-mcp
+      - aivenv
+    command: python bot_utils.py
+    env_file:
+      - ./.env
+    # bot は ngrok を 127.0.0.1:<port> へ転送し、mcp(8000)/aivenv(8080/8081) も
+    # localhost 経由で参照する。host ネットワークなら publish 済みポートにそのまま届く。
+    network_mode: host
+    # trpg_terminal を併設し URL 連携する場合は ngrok-url ファイルをマウントする:
+    # volumes:
+    #   - /opt/products/trpg_terminal/ngrok-url.txt:/opt/products/trpg_terminal/ngrok-url.txt:ro
+    restart: always

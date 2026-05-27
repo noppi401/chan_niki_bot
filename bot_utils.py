@@ -51,7 +51,10 @@ def start_aivenv_server() -> bool:
     global _aivenv_proc
     if is_aivenv_server_running():
         return False
-    aivenv_exe = os.path.join(AIVENV_DIR, ".venv", "Scripts", "aivenv.exe")
+    if sys.platform == "win32":
+        aivenv_exe = os.path.join(AIVENV_DIR, ".venv", "Scripts", "aivenv.exe")
+    else:
+        aivenv_exe = os.path.join(AIVENV_DIR, ".venv", "bin", "aivenv")
     try:
         _aivenv_proc = subprocess.Popen(
             [aivenv_exe, "start"],

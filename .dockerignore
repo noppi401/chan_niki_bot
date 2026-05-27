@@ -1,0 +1,9 @@
+.git
+__pycache__/
+*.py[cod]
+.env
+*.env
+cache.db
+node_modules/
+deploy/
+*.log
