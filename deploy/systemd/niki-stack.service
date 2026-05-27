@@ -1,0 +1,20 @@
+[Unit]
+# 本番スタック(docker-compose.prod.yml)を boot 時に起動する systemd unit。
+# Docker 起動後に一度 `up -d` する。各サービスは restart: always のため、
+# 以後の再起動はコンテナ側で復帰する（この unit は冪等な起動トリガ）。
+Description=niki production stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# clone 先に合わせて WorkingDirectory と ExecStart/ExecStop のパスを書き換えること。
+WorkingDirectory=/opt/products/ニキ
+ExecStart=/opt/products/ニキ/start-prod.sh
+ExecStop=/usr/bin/docker compose -f /opt/products/ニキ/docker-compose.prod.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

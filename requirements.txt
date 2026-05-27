@@ -1,0 +1,13 @@
+# ニキ (Discord bot) + mcp_server.py の実行依存
+# fishing-mcp は別リポジトリで、Docker ビルド時に追加コンテキストから
+# pip install される（docker-compose.prod.yml の niki-mcp build を参照）。
+# これにより mcp / beautifulsoup4 など fishing_mcp 側の依存も入る。
+
+discord.py>=2.3.0
+openai>=1.51.0
+python-dotenv>=1.0.1
+httpx>=0.27.0
+ngrok>=1.4.0
+fastapi>=0.115.0
+slowapi>=0.1.9
+uvicorn[standard]>=0.30.0
